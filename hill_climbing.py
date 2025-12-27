@@ -68,6 +68,7 @@ def compute_fitness(
 
 def mutate_seed(
     seed: np.ndarray,
+    image_to_mutate: np.ndarray,
     epsilon: float
 ) -> List[np.ndarray]:
     """
@@ -89,12 +90,13 @@ def mutate_seed(
     Requirements:
         ✓ Return a list of neighbors: [neighbor1, neighbor2, ..., neighborK]
         ✓ K can be ANY size ≥ 1
-        ✓ Neighbors must be deep copies of seed
+        ✓ Neighbors must be deep copies of image_to_mutate
         ✓ Pixel values must remain in [0, 255]
-        ✓ Must obey the L∞ bound exactly
+        ✓ Must obey the L∞ bound exactly relative to ORIGINAL seed and the current image
 
     Args:
-        seed (np.ndarray): input image
+        seed (np.ndarray): ORIGINAL input image (reference for constraint)
+        image_to_mutate (np.ndarray): current image to mutate from
         epsilon (float): allowed perturbation budget
 
     Returns:
@@ -107,15 +109,29 @@ def mutate_seed(
 
     # Strategy 1: Single pixel mutation (generate 5 variants)
     for _ in range(5):
-        neighbor = seed.copy()
+        neighbor = image_to_mutate.copy()
         # Randomly select a pixel
         i = random.randint(0, height - 1)
         j = random.randint(0, width - 1)
         c = random.randint(0, channels - 1)
 
-        # Generate random perturbation within bounds
-        perturbation = random.uniform(-max_pixel_change, max_pixel_change)
-        new_value = neighbor[i, j, c] + perturbation
+        # Calculate current difference from ORIGINAL seed
+        current_value = neighbor[i, j, c]
+        original_value = seed[i, j, c]
+        current_diff = current_value - original_value
+
+        # Determine available perturbation range
+        # Can't exceed ±max_pixel_change from original
+        available_positive = max_pixel_change - current_diff  # How much we can add
+        available_negative = -max_pixel_change - current_diff  # How much we can subtract
+
+        # Ensure we don't exceed bounds
+        max_add = min(max_pixel_change, available_positive)
+        max_subtract = max(-max_pixel_change, available_negative)
+
+        # Generate random perturbation within available range
+        perturbation = random.uniform(max_subtract, max_add)
+        new_value = current_value + perturbation
 
         # Clip to valid pixel range [0, 255]
         new_value = np.clip(new_value, 0, 255)
@@ -126,52 +142,89 @@ def mutate_seed(
 
     # Strategy 2: 3x3 patch mutation (generate 3 variants)
     for _ in range(3):
-        neighbor = seed.copy()
+        neighbor = image_to_mutate.copy()
         # Random patch location
         patch_size = 3
         i_start = random.randint(0, height - patch_size - 1)
         j_start = random.randint(0, width - patch_size - 1)
 
-        # Apply random noise to the patch
-        patch_noise = np.random.uniform(
-            -max_pixel_change, max_pixel_change,
-            (patch_size, patch_size, channels)
-        )
+        # Get patch areas
+        patch_area = neighbor[i_start:i_start + patch_size, j_start:j_start + patch_size, :]
+        original_patch = seed[i_start:i_start + patch_size, j_start:j_start + patch_size, :]
 
-        # Apply and clip
-        patch_area = neighbor[i_start:i_start+patch_size, j_start:j_start+patch_size, :]
+        # Calculate current differences from original
+        current_diffs = patch_area - original_patch
+
+        # Generate noise within remaining budget
+        # For each pixel, we can add between (-max_pixel_change - current_diff) and (max_pixel_change - current_diff)
+        available_positive = max_pixel_change - current_diffs
+        available_negative = -max_pixel_change - current_diffs
+
+        # Create random noise within bounds
+        patch_noise = np.zeros_like(patch_area)
+        for ci in range(patch_size):
+            for cj in range(patch_size):
+                for cc in range(channels):
+                    max_add = min(max_pixel_change, available_positive[ci, cj, cc])
+                    max_subtract = max(-max_pixel_change, available_negative[ci, cj, cc])
+                    patch_noise[ci, cj, cc] = random.uniform(max_subtract, max_add)
+
+        # Apply noise and clip
         new_patch = np.clip(patch_area + patch_noise, 0, 255)
-        neighbor[i_start:i_start+patch_size, j_start:j_start+patch_size, :] = new_patch
+        neighbor[i_start:i_start + patch_size, j_start:j_start + patch_size, :] = new_patch
         neighbors.append(neighbor)
 
     # Strategy 3: Channel-wise perturbation (generate 2 variants)
     for _ in range(2):
-        neighbor = seed.copy()
+        neighbor = image_to_mutate.copy()
         # Select a random channel
         channel = random.randint(0, channels - 1)
 
-        # Generate small noise pattern for the entire channel
-        channel_noise = np.random.uniform(
-            -max_pixel_change * 0.3, max_pixel_change * 0.3,
-            (height, width)
-        )
+        # Get current channel values
+        current_channel = neighbor[:, :, channel]
+        original_channel = seed[:, :, channel]
+        current_diffs = current_channel - original_channel
+
+        # Generate noise within remaining budget
+        channel_noise = np.zeros((height, width))
+        for i in range(height):
+            for j in range(width):
+                available_positive = max_pixel_change - current_diffs[i, j]
+                available_negative = -max_pixel_change - current_diffs[i, j]
+                max_add = min(max_pixel_change * 0.3, available_positive)  # Scale down for channel-wide
+                max_subtract = max(-max_pixel_change * 0.3, available_negative)
+                channel_noise[i, j] = random.uniform(max_subtract, max_add)
 
         # Apply to channel and clip
-        channel_data = neighbor[:, :, channel]
-        new_channel = np.clip(channel_data + channel_noise, 0, 255)
+        new_channel = np.clip(current_channel + channel_noise, 0, 255)
         neighbor[:, :, channel] = new_channel
         neighbors.append(neighbor)
 
-    # Strategy 4: Gaussian noise with small sigma (generate 2 variants)
+    # Strategy 4: Gaussian noise with constraint checking (generate 2 variants)
     for _ in range(2):
-        neighbor = seed.copy()
-        # Add small Gaussian noise
+        neighbor = image_to_mutate.copy()
+
+        # Calculate current differences from original
+        current_diffs = neighbor - seed
+
+        # Generate small Gaussian noise
         noise = np.random.normal(0, max_pixel_change * 0.1, seed.shape)
+
+        # Check each pixel if noise would exceed bounds
+        for i in range(height):
+            for j in range(width):
+                for c in range(channels):
+                    proposed_change = current_diffs[i, j, c] + noise[i, j, c]
+                    if abs(proposed_change) > max_pixel_change:
+                        # Scale noise down to fit within bounds
+                        max_allowed = max_pixel_change - abs(current_diffs[i, j, c])
+                        noise[i, j, c] = np.sign(noise[i, j, c]) * min(abs(noise[i, j, c]), max_allowed)
+
+        # Apply noise and clip
         neighbor = np.clip(neighbor + noise, 0, 255)
         neighbors.append(neighbor)
 
     return neighbors
-
 
 # ============================================================
 # 3. SELECT BEST CANDIDATE
@@ -248,7 +301,7 @@ def hill_climb(
 
     for iteration in range(iterations):
         # Generate neighbors
-        neighbors = mutate_seed(current_image, epsilon)
+        neighbors = mutate_seed(initial_seed, current_image, epsilon)
 
         # Add current image to candidates (elitism)
         candidates = neighbors + [current_image.copy()]
@@ -297,7 +350,7 @@ if __name__ == "__main__":
         image_list = json.load(f)
 
     # Pick first entry
-    item = image_list[2]
+    item = image_list[9]
     image_path = "images/" + item["image"]
     target_label = item["label"]
 
