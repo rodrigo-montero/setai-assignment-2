@@ -19,6 +19,7 @@ from typing import List, Tuple
 from keras.applications import vgg16
 from keras.applications.imagenet_utils import decode_predictions
 from keras.utils import array_to_img, load_img, img_to_array
+import os
 
 
 # ============================================================
@@ -68,7 +69,6 @@ def compute_fitness(
 
 def mutate_seed(
     seed: np.ndarray,
-    image_to_mutate: np.ndarray,
     epsilon: float
 ) -> List[np.ndarray]:
     """
@@ -90,13 +90,10 @@ def mutate_seed(
     Requirements:
         ✓ Return a list of neighbors: [neighbor1, neighbor2, ..., neighborK]
         ✓ K can be ANY size ≥ 1
-        ✓ Neighbors must be deep copies of image_to_mutate
         ✓ Pixel values must remain in [0, 255]
-        ✓ Must obey the L∞ bound exactly relative to ORIGINAL seed and the current image
 
     Args:
-        seed (np.ndarray): ORIGINAL input image (reference for constraint)
-        image_to_mutate (np.ndarray): current image to mutate from
+        seed (np.ndarray): input image
         epsilon (float): allowed perturbation budget
 
     Returns:
@@ -109,119 +106,53 @@ def mutate_seed(
 
     # Strategy 1: Single pixel mutation (generate 5 variants)
     for _ in range(5):
-        neighbor = image_to_mutate.copy()
+        neighbor = seed.copy()
         # Randomly select a pixel
         i = random.randint(0, height - 1)
         j = random.randint(0, width - 1)
         c = random.randint(0, channels - 1)
 
-        # Calculate current difference from ORIGINAL seed
-        current_value = neighbor[i, j, c]
-        original_value = seed[i, j, c]
-        current_diff = current_value - original_value
-
-        # Determine available perturbation range
-        # Can't exceed ±max_pixel_change from original
-        available_positive = max_pixel_change - current_diff  # How much we can add
-        available_negative = -max_pixel_change - current_diff  # How much we can subtract
-
-        # Ensure we don't exceed bounds
-        max_add = min(max_pixel_change, available_positive)
-        max_subtract = max(-max_pixel_change, available_negative)
-
-        # Generate random perturbation within available range
-        perturbation = random.uniform(max_subtract, max_add)
-        new_value = current_value + perturbation
-
-        # Clip to valid pixel range [0, 255]
-        new_value = np.clip(new_value, 0, 255)
-
-        # Apply perturbation
-        neighbor[i, j, c] = new_value
+        perturbation = random.uniform(-max_pixel_change, max_pixel_change)
+        neighbor[i, j, c] += perturbation
         neighbors.append(neighbor)
 
     # Strategy 2: 3x3 patch mutation (generate 3 variants)
     for _ in range(3):
-        neighbor = image_to_mutate.copy()
-        # Random patch location
-        patch_size = 3
-        i_start = random.randint(0, height - patch_size - 1)
-        j_start = random.randint(0, width - patch_size - 1)
+        neighbor = seed.copy()
+        channel = random.randint(0, channels - 1)
 
-        # Get patch areas
-        patch_area = neighbor[i_start:i_start + patch_size, j_start:j_start + patch_size, :]
-        original_patch = seed[i_start:i_start + patch_size, j_start:j_start + patch_size, :]
-
-        # Calculate current differences from original
-        current_diffs = patch_area - original_patch
-
-        # Generate noise within remaining budget
-        # For each pixel, we can add between (-max_pixel_change - current_diff) and (max_pixel_change - current_diff)
-        available_positive = max_pixel_change - current_diffs
-        available_negative = -max_pixel_change - current_diffs
-
-        # Create random noise within bounds
-        patch_noise = np.zeros_like(patch_area)
-        for ci in range(patch_size):
-            for cj in range(patch_size):
-                for cc in range(channels):
-                    max_add = min(max_pixel_change, available_positive[ci, cj, cc])
-                    max_subtract = max(-max_pixel_change, available_negative[ci, cj, cc])
-                    patch_noise[ci, cj, cc] = random.uniform(max_subtract, max_add)
-
-        # Apply noise and clip
-        new_patch = np.clip(patch_area + patch_noise, 0, 255)
-        neighbor[i_start:i_start + patch_size, j_start:j_start + patch_size, :] = new_patch
+        # Add smaller noise to whole channel
+        channel_noise = np.random.uniform(
+            -max_pixel_change * 0.3,
+            max_pixel_change * 0.3,
+            (height, width)
+        )
+        neighbor[:, :, channel] += channel_noise
         neighbors.append(neighbor)
 
     # Strategy 3: Channel-wise perturbation (generate 2 variants)
     for _ in range(2):
-        neighbor = image_to_mutate.copy()
+        neighbor = seed.copy()
         # Select a random channel
         channel = random.randint(0, channels - 1)
 
-        # Get current channel values
-        current_channel = neighbor[:, :, channel]
-        original_channel = seed[:, :, channel]
-        current_diffs = current_channel - original_channel
-
-        # Generate noise within remaining budget
-        channel_noise = np.zeros((height, width))
-        for i in range(height):
-            for j in range(width):
-                available_positive = max_pixel_change - current_diffs[i, j]
-                available_negative = -max_pixel_change - current_diffs[i, j]
-                max_add = min(max_pixel_change * 0.3, available_positive)  # Scale down for channel-wide
-                max_subtract = max(-max_pixel_change * 0.3, available_negative)
-                channel_noise[i, j] = random.uniform(max_subtract, max_add)
+        # Generate small noise pattern for the entire channel
+        channel_noise = np.random.uniform(
+            -max_pixel_change * 0.3, max_pixel_change * 0.3,
+            (height, width)
+        )
 
         # Apply to channel and clip
-        new_channel = np.clip(current_channel + channel_noise, 0, 255)
+        channel_data = neighbor[:, :, channel]
+        new_channel = np.clip(channel_data + channel_noise, 0, 255)
         neighbor[:, :, channel] = new_channel
         neighbors.append(neighbor)
 
-    # Strategy 4: Gaussian noise with constraint checking (generate 2 variants)
+    # Strategy 4: Gaussian noise with small sigma (generate 2 variants)
     for _ in range(2):
-        neighbor = image_to_mutate.copy()
-
-        # Calculate current differences from original
-        current_diffs = neighbor - seed
-
-        # Generate small Gaussian noise
+        neighbor = seed.copy()
         noise = np.random.normal(0, max_pixel_change * 0.1, seed.shape)
-
-        # Check each pixel if noise would exceed bounds
-        for i in range(height):
-            for j in range(width):
-                for c in range(channels):
-                    proposed_change = current_diffs[i, j, c] + noise[i, j, c]
-                    if abs(proposed_change) > max_pixel_change:
-                        # Scale noise down to fit within bounds
-                        max_allowed = max_pixel_change - abs(current_diffs[i, j, c])
-                        noise[i, j, c] = np.sign(noise[i, j, c]) * min(abs(noise[i, j, c]), max_allowed)
-
-        # Apply noise and clip
-        neighbor = np.clip(neighbor + noise, 0, 255)
+        neighbor += noise
         neighbors.append(neighbor)
 
     return neighbors
@@ -294,6 +225,10 @@ def hill_climb(
     current_image = initial_seed.copy()
     current_fitness = compute_fitness(current_image, model, target_label)
 
+    budget = 255 * epsilon
+    min_bound = np.clip(initial_seed - budget, 0, 255)
+    max_bound = np.clip(initial_seed + budget, 0, 255)
+
     print(f"Initial fitness: {current_fitness:.4f}")
 
     no_improvement_count = 0
@@ -301,10 +236,16 @@ def hill_climb(
 
     for iteration in range(iterations):
         # Generate neighbors
-        neighbors = mutate_seed(initial_seed, current_image, epsilon)
+        raw_neighbors = mutate_seed(initial_seed, epsilon)
+
+        valid_neighbors = []
+        for n in raw_neighbors:
+            n_clipped = np.clip(n, min_bound, max_bound)
+            n_clipped = np.clip(n_clipped, 0, 255)
+            valid_neighbors.append(n_clipped)
 
         # Add current image to candidates (elitism)
-        candidates = neighbors + [current_image.copy()]
+        candidates = valid_neighbors + [current_image.copy()]
 
         # Select best candidate
         best_candidate, best_fitness = select_best(candidates, model, target_label)
@@ -342,8 +283,11 @@ def hill_climb(
 # ============================================================
 
 if __name__ == "__main__":
-    # Load classifier
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1" #Comment out if you want to use GPU
     model = vgg16.VGG16(weights="imagenet")
+
+    epsilon = 0.30
+    iterations = 300
 
     # Load JSON describing dataset
     with open("data/image_labels.json") as f:
@@ -379,8 +323,8 @@ if __name__ == "__main__":
         initial_seed=seed,
         model=model,
         target_label=target_label,
-        epsilon=0.30,
-        iterations=300
+        epsilon=epsilon,
+        iterations=iterations
     )
     end_time = time.time()
 
@@ -397,15 +341,44 @@ if __name__ == "__main__":
     # Print final predictions
     final_preds = model.predict(np.expand_dims(final_img, axis=0))
     print("\nFinal predictions (top-5):")
-    for cl in decode_predictions(final_preds, top=5)[0]:
+    decoded_final = decode_predictions(final_preds, top=5)[0]
+    for cl in decoded_final:
         print(f"{cl[1]:20s}  prob={cl[2]:.5f}")
 
-    # Calculate and display perturbation
+    # Calculate perturbation
     perturbation = np.abs(final_img - seed)
     max_perturbation = np.max(perturbation)
     avg_perturbation = np.mean(perturbation)
 
-    print(f"\nPerturbation analysis:")
-    print(f"Max pixel change: {max_perturbation:.2f} (allowed: {255*0.30:.2f})")
-    print(f"Average pixel change: {avg_perturbation:.2f}")
-    print(f"L∞ distance: {np.max(np.abs(final_img - seed)):.2f}")
+    base_results_folder = "hc_results"
+    timestamp = int(time.time())
+
+    results_folder = os.path.join(base_results_folder, f"{target_label}_{timestamp}")
+
+    if not os.path.exists(results_folder):
+        os.makedirs(results_folder)
+
+    array_to_img(seed).save(os.path.join(results_folder, "original.png"))
+    array_to_img(final_img).save(os.path.join(results_folder, "adversarial.png"))
+
+    info = {
+        "target_label": target_label,
+        "final_fitness": float(final_fitness),
+        "mutation_type": "mixed_strategies",
+        "top_prediction": decoded_final[0][1],
+        "top_confidence": float(decoded_final[0][2]),
+        "perturbation": {
+            "max_pixel_change": f"{max_perturbation:.2f} (allowed: {255*0.30:.2f})",
+            "average_pixel_change": f"{avg_perturbation:.2f}",
+            "L_inf_distance": f"{np.max(np.abs(final_img - seed)):.2f}",
+        },
+        "epsilon": epsilon,
+        "iterations": iterations,
+        "success": bool(final_fitness < 0),
+        "time_taken": f"{end_time - start_time:.2f} seconds",
+    }
+
+    with open(os.path.join(results_folder, "info.json"), "w") as f:
+        json.dump(info, f, indent=4)
+
+    print(f"\n[INFO] Saved results to unique folder: {results_folder}/")
