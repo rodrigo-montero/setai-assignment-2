@@ -105,7 +105,7 @@ def mutate_seed(
     max_pixel_change = 255 * epsilon
 
     # Strategy 1: Single pixel mutation (generate 5 variants)
-    for _ in range(5):
+    for _ in range(20):
         neighbor = seed.copy()
         # Randomly select a pixel
         i = random.randint(0, height - 1)
@@ -119,33 +119,21 @@ def mutate_seed(
     # Strategy 2: 3x3 patch mutation (generate 3 variants)
     for _ in range(3):
         neighbor = seed.copy()
-        channel = random.randint(0, channels - 1)
+        patch_size = 3
+        i_start = random.randint(0, height - patch_size - 1)
+        j_start = random.randint(0, width - patch_size - 1)
 
-        # Add smaller noise to whole channel
-        channel_noise = np.random.uniform(
-            -max_pixel_change * 0.3,
-            max_pixel_change * 0.3,
-            (height, width)
-        )
-        neighbor[:, :, channel] += channel_noise
+        # Smaller step size for patches to avoid mass-clipping
+        noise = np.random.uniform(-max_pixel_change * 0.5, max_pixel_change * 0.5, (patch_size, patch_size, channels))
+        neighbor[i_start:i_start + patch_size, j_start:j_start + patch_size, :] += noise
         neighbors.append(neighbor)
 
     # Strategy 3: Channel-wise perturbation (generate 2 variants)
     for _ in range(2):
         neighbor = seed.copy()
-        # Select a random channel
-        channel = random.randint(0, channels - 1)
-
-        # Generate small noise pattern for the entire channel
-        channel_noise = np.random.uniform(
-            -max_pixel_change * 0.3, max_pixel_change * 0.3,
-            (height, width)
-        )
-
-        # Apply to channel and clip
-        channel_data = neighbor[:, :, channel]
-        new_channel = np.clip(channel_data + channel_noise, 0, 255)
-        neighbor[:, :, channel] = new_channel
+        c = random.randint(0, channels - 1)
+        noise = np.random.uniform(-max_pixel_change * 0.2, max_pixel_change * 0.2, (height, width))
+        neighbor[:, :, c] += noise
         neighbors.append(neighbor)
 
     # Strategy 4: Gaussian noise with small sigma (generate 2 variants)
@@ -236,7 +224,7 @@ def hill_climb(
 
     for iteration in range(iterations):
         # Generate neighbors
-        raw_neighbors = mutate_seed(initial_seed, epsilon)
+        raw_neighbors = mutate_seed(current_image, epsilon)
 
         valid_neighbors = []
         for n in raw_neighbors:
